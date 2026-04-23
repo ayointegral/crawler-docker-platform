@@ -102,6 +102,30 @@ services:
     networks:
       - crawler-net
 
+  platform-bootstrap:
+    image: python:3.11-slim
+    container_name: platform-bootstrap
+    command: ["python", "/opt/platform/scripts/bootstrap_airflow.py"]
+    environment:
+      AIRFLOW_BASE_URL: http://airflow-webserver:8080
+      AIRFLOW_USERNAME: ${AIRFLOW_ADMIN_USERNAME:-admin}
+      AIRFLOW_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin}
+      AIRFLOW_DAG_ID: crawler_csv_to_postgres
+      AIRFLOW_BOOTSTRAP_ON_STARTUP: ${AIRFLOW_BOOTSTRAP_ON_STARTUP:-true}
+      AIRFLOW_BOOTSTRAP_TIMEOUT_SECONDS: ${AIRFLOW_BOOTSTRAP_TIMEOUT_SECONDS:-300}
+      CRAWLER_START_URLS: ${CRAWLER_START_URLS:-https://books.toscrape.com/}
+      CRAWLER_KEYWORDS: ${CRAWLER_KEYWORDS:-}
+      CRAWLER_MAX_PAGES: ${CRAWLER_MAX_PAGES:-2}
+      CRAWLER_COMPARTMENT: ${CRAWLER_COMPARTMENT:-bootstrap}
+      CRAWLER_SOURCE_CONFIG: ${CRAWLER_SOURCE_CONFIG:-/opt/platform/crawler/schemas/default_schema.yml}
+    volumes:
+      - ./scripts:/opt/platform/scripts:ro
+    depends_on:
+      airflow-webserver:
+        condition: service_started
+    networks:
+      - crawler-net
+
   airflow-scheduler:
     build:
       context: ./pipeline

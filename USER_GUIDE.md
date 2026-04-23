@@ -25,6 +25,7 @@ Execution path:
 - `airflow-webserver` -> `http://localhost:8080`
 - `superset` -> `http://localhost:8088`
 - `postgres`, `redis`, `airflow-scheduler`, `airflow-worker`, `airflow-triggerer` run internal-only.
+- `platform-bootstrap` auto-triggers first DAG run when no historical runs exist.
 - Optional fallback UI: `control-ui-legacy` on `http://localhost:8502` (profile `legacy-ui`).
 
 ## 4. Credentials
@@ -57,6 +58,15 @@ Expected main running containers:
 One-time containers:
 - `airflow-init`
 - `superset-init`
+- `platform-bootstrap`
+
+## 5.1 First-Run Bootstrap
+On a fresh machine (no existing Airflow DAG runs), `platform-bootstrap` automatically:
+1. waits for Airflow API readiness,
+2. unpauses DAG `crawler_csv_to_postgres`,
+3. triggers run `bootstrap__initial` using `.env` crawler defaults.
+
+If runs already exist, bootstrap trigger is skipped.
 
 ## 6. Environment Defaults
 Always create `.env` from sample first:
@@ -74,6 +84,8 @@ Core crawler defaults in `.env`:
 Core auth/secrets:
 - `AIRFLOW_ADMIN_USERNAME`, `AIRFLOW_ADMIN_PASSWORD`
 - `AIRFLOW__WEBSERVER__SECRET_KEY`
+- `AIRFLOW_BOOTSTRAP_ON_STARTUP`
+- `AIRFLOW_BOOTSTRAP_TIMEOUT_SECONDS`
 - `SUPERSET_ADMIN_USERNAME`, `SUPERSET_ADMIN_PASSWORD`
 - `SUPERSET_SECRET_KEY`
 
@@ -283,6 +295,7 @@ docker compose -f compose.yml logs --tail=400 \
 ```
 
 ## 16. Known Behavior
+- First startup may take a few minutes because Airflow/Superset initialize and bootstrap DAG runs once.
 - If a run returns zero records (for example strict keyword filter), transform stage now writes an empty processed CSV and pipeline continues without hard failure.
 - Superset dashboard route usually returns HTTP `302` until logged in.
 

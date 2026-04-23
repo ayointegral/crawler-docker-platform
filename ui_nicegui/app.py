@@ -130,8 +130,8 @@ def app_ui() -> None:
             with ui.card().classes("suite-card p-4 grow"):
                 ui.label("Create Crawl Run").classes("text-lg font-bold")
                 use_env_defaults = ui.checkbox("Use only .env defaults for this run", value=False)
-                urls_input = ui.textarea("Website URLs (comma or newline separated)", value="https://books.toscrape.com/").props("autogrow")
-                keywords_input = ui.input("Search Keywords (comma separated)", value="")
+                urls_input = ui.textarea("Website URLs (comma or newline separated)", value="https://books.toscrape.com/").props("autogrow").classes("w-full")
+                keywords_input = ui.input("Search Keywords (comma separated)", value="").classes("w-full")
                 with ui.row().classes("w-full gap-3"):
                     compartment_input = ui.input("Compartment / Purpose", value="default").classes("grow")
                     max_pages_input = ui.number("Max pages per run", value=10, min=1, max=200, step=1).classes("w-40")
@@ -195,7 +195,7 @@ def app_ui() -> None:
                     ui.button("Unpause DAG", on_click=on_unpause).props("outline color=secondary")
                     ui.button("Pause DAG", on_click=on_pause).props("outline color=warning")
 
-            with ui.card().classes("suite-card p-4 w-[430px] max-w-full"):
+            with ui.card().classes("suite-card p-4 w-[360px] max-w-full"):
                 ui.label("Run Health").classes("text-lg font-bold")
                 pie_chart = ui.echart(
                     {

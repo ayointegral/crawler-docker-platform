@@ -27,6 +27,7 @@ Containerized platform for configurable web crawling, orchestration, data wareho
 - `superset-init`
 - `superset`
 - `control-ui` (NiceGUI primary)
+- `platform-bootstrap` (automatic first-run DAG trigger for out-of-box data seeding)
 - `control-ui-legacy` (Streamlit fallback, profile `legacy-ui`)
 
 ## Quick Start
@@ -44,6 +45,13 @@ Open:
 Credentials:
 - Airflow: `admin` / `admin`
 - Superset: `admin` / `admin`
+
+
+## Out-of-Box Behavior
+- `docker compose -f compose.yml up --build -d` is enough for first run.
+- `platform-bootstrap` waits for Airflow, unpauses DAG, and triggers one initial run (`bootstrap__initial`) **only when no DAG runs exist yet**.
+- Superset assets are auto-created; data appears once the bootstrap DAG run finishes.
+- Expected first startup time for full stack + initial data: about 2-6 minutes depending on machine/network.
 
 ## Source Configuration (Schema-Driven)
 Default schema: `crawler/schemas/default_schema.yml`
