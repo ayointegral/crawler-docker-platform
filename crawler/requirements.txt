@@ -1,2 +1,2 @@
-Scrapy==2.11.2
+Scrapy==2.15.0
 PyYAML==6.0.2
