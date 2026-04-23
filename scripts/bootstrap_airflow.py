@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import sys
 import time
 from typing import Any
 from urllib import error, parse, request
@@ -11,6 +10,7 @@ from urllib import error, parse, request
 AIRFLOW_BASE_URL = os.getenv("AIRFLOW_BASE_URL", "http://airflow-webserver:8080").rstrip("/")
 AIRFLOW_USERNAME = os.getenv("AIRFLOW_USERNAME", "admin")
 AIRFLOW_PASSWORD = os.getenv("AIRFLOW_PASSWORD", "admin")
+ORCHESTRATOR_BASE_URL = os.getenv("ORCHESTRATOR_BASE_URL", "http://temporal-orchestrator:8090").rstrip("/")
 DAG_ID = os.getenv("AIRFLOW_DAG_ID", "crawler_csv_to_postgres")
 BOOTSTRAP_ENABLED = os.getenv("AIRFLOW_BOOTSTRAP_ON_STARTUP", "true").strip().lower() in {"1", "true", "yes", "y"}
 BOOTSTRAP_TIMEOUT_SECONDS = int(os.getenv("AIRFLOW_BOOTSTRAP_TIMEOUT_SECONDS", "300"))
@@ -21,7 +21,7 @@ def _auth_header() -> str:
     return f"Basic {token}"
 
 
-def _request(method: str, path: str, payload: dict[str, Any] | None = None) -> tuple[int, dict[str, Any] | None, str]:
+def _airflow_request(method: str, path: str, payload: dict[str, Any] | None = None) -> tuple[int, dict[str, Any] | None, str]:
     body = None
     headers = {
         "Authorization": _auth_header(),
@@ -45,14 +45,52 @@ def _request(method: str, path: str, payload: dict[str, Any] | None = None) -> t
         except Exception:
             pass
         return exc.code, data, raw
+    except error.URLError as exc:
+        return 503, None, str(exc)
+
+
+def _orchestrator_request(method: str, path: str, payload: dict[str, Any] | None = None) -> tuple[int, dict[str, Any] | None, str]:
+    body = None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    req = request.Request(f"{ORCHESTRATOR_BASE_URL}{path}", data=body, method=method, headers=headers)
+    try:
+        with request.urlopen(req, timeout=25) as resp:
+            raw = resp.read().decode("utf-8")
+            data = json.loads(raw) if raw else None
+            return resp.getcode(), data, raw
+    except error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="ignore")
+        data = None
+        try:
+            data = json.loads(raw)
+        except Exception:
+            pass
+        return exc.code, data, raw
+    except error.URLError as exc:
+        return 503, None, str(exc)
 
 
 def _wait_for_airflow() -> bool:
     deadline = time.time() + BOOTSTRAP_TIMEOUT_SECONDS
     while time.time() < deadline:
-        code, _, _ = _request("GET", "/health")
+        code, _, _ = _airflow_request("GET", "/health")
         if code == 200:
             print("Airflow health endpoint is ready")
+            return True
+        time.sleep(3)
+    return False
+
+
+def _wait_for_orchestrator() -> bool:
+    deadline = time.time() + BOOTSTRAP_TIMEOUT_SECONDS
+    while time.time() < deadline:
+        code, _, _ = _orchestrator_request("GET", "/health")
+        if code == 200:
+            print("Temporal orchestrator endpoint is ready")
             return True
         time.sleep(3)
     return False
@@ -67,14 +105,18 @@ def main() -> int:
         print("Timed out waiting for Airflow health")
         return 1
 
-    code, dag_details, raw = _request("GET", f"/api/v1/dags/{parse.quote(DAG_ID)}")
+    if not _wait_for_orchestrator():
+        print("Timed out waiting for temporal orchestrator health")
+        return 1
+
+    code, _, raw = _airflow_request("GET", f"/api/v1/dags/{parse.quote(DAG_ID)}")
     if code != 200:
         print(f"Cannot load DAG {DAG_ID}: HTTP {code} {raw}")
         return 1
 
-    _request("PATCH", f"/api/v1/dags/{parse.quote(DAG_ID)}", {"is_paused": False})
+    _airflow_request("PATCH", f"/api/v1/dags/{parse.quote(DAG_ID)}", {"is_paused": False})
 
-    code, dag_runs, raw = _request("GET", f"/api/v1/dags/{parse.quote(DAG_ID)}/dagRuns?limit=1")
+    code, dag_runs, raw = _airflow_request("GET", f"/api/v1/dags/{parse.quote(DAG_ID)}/dagRuns?limit=1")
     if code != 200:
         print(f"Cannot list DAG runs: HTTP {code} {raw}")
         return 1
@@ -101,16 +143,19 @@ def main() -> int:
     }
 
     payload = {
-        "dag_run_id": "bootstrap__initial",
+        "dag_id": DAG_ID,
         "conf": conf,
-        "note": "Automatic bootstrap run for out-of-box data seeding",
+        "wait_for_completion": False,
     }
-    code, _, raw = _request("POST", f"/api/v1/dags/{parse.quote(DAG_ID)}/dagRuns", payload)
-    if code not in {200, 201, 409}:
-        print(f"Failed to trigger bootstrap DAG run: HTTP {code} {raw}")
+    code, data, raw = _orchestrator_request("POST", "/workflows/crawl/trigger", payload)
+    if code not in {200, 201}:
+        print(f"Failed to trigger bootstrap workflow via temporal orchestrator: HTTP {code} {raw}")
         return 1
 
-    print("Bootstrap DAG run triggered successfully")
+    print(
+        "Bootstrap workflow triggered successfully "
+        f"(workflow_id={data.get('workflow_id')}, run_id={data.get('run_id')})"
+    )
     return 0
 
 

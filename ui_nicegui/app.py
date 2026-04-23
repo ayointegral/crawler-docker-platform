@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
+from typing import Any
 
-import pandas as pd
 import requests
 from nicegui import ui
 from requests.auth import HTTPBasicAuth
@@ -12,36 +12,52 @@ DAG_ID = os.getenv("AIRFLOW_DAG_ID", "crawler_csv_to_postgres")
 AIRFLOW_BASE_URL = os.getenv("AIRFLOW_BASE_URL", "http://airflow-webserver:8080")
 AIRFLOW_USERNAME = os.getenv("AIRFLOW_USERNAME", "admin")
 AIRFLOW_PASSWORD = os.getenv("AIRFLOW_PASSWORD", "admin")
+ORCHESTRATOR_BASE_URL = os.getenv("ORCHESTRATOR_BASE_URL", "http://temporal-orchestrator:8090")
 SUPERSET_DASHBOARD_URL = os.getenv(
     "SUPERSET_DASHBOARD_URL",
     "http://localhost:8088/superset/dashboard/crawler-analytics/",
 )
+TEMPORAL_UI_URL = os.getenv("TEMPORAL_UI_URL", "http://localhost:8233")
 
 
-class AirflowClient:
+class PlatformClient:
     def __init__(self) -> None:
         self.auth = HTTPBasicAuth(AIRFLOW_USERNAME, AIRFLOW_PASSWORD)
 
-    def _request(self, method: str, path: str, **kwargs) -> requests.Response:
+    def _airflow(self, method: str, path: str, **kwargs) -> requests.Response:
         url = f"{AIRFLOW_BASE_URL.rstrip('/')}{path}"
         return requests.request(method, url, auth=self.auth, timeout=20, **kwargs)
 
-    def dag_details(self) -> dict:
-        response = self._request("GET", f"/api/v1/dags/{DAG_ID}/details")
+    def _orchestrator(self, method: str, path: str, **kwargs) -> requests.Response:
+        url = f"{ORCHESTRATOR_BASE_URL.rstrip('/')}{path}"
+        return requests.request(method, url, timeout=20, **kwargs)
+
+    def dag_details(self) -> dict[str, Any]:
+        response = self._airflow("GET", f"/api/v1/dags/{DAG_ID}/details")
         response.raise_for_status()
         return response.json()
 
-    def recent_runs(self, limit: int = 30) -> list[dict]:
-        response = self._request("GET", f"/api/v1/dags/{DAG_ID}/dagRuns?limit={limit}")
+    def recent_runs(self, limit: int = 30) -> list[dict[str, Any]]:
+        response = self._airflow("GET", f"/api/v1/dags/{DAG_ID}/dagRuns?limit={limit}")
         response.raise_for_status()
         return response.json().get("dag_runs", [])
 
     def set_paused(self, paused: bool) -> None:
-        response = self._request("PATCH", f"/api/v1/dags/{DAG_ID}", json={"is_paused": paused})
+        response = self._airflow("PATCH", f"/api/v1/dags/{DAG_ID}", json={"is_paused": paused})
         response.raise_for_status()
 
-    def trigger_run(self, conf: dict) -> dict:
-        response = self._request("POST", f"/api/v1/dags/{DAG_ID}/dagRuns", json={"conf": conf})
+    def trigger_run_via_temporal(self, conf: dict[str, Any]) -> dict[str, Any]:
+        payload = {
+            "dag_id": DAG_ID,
+            "conf": conf,
+            "wait_for_completion": False,
+        }
+        response = self._orchestrator("POST", "/workflows/crawl/trigger", json=payload)
+        response.raise_for_status()
+        return response.json()
+
+    def temporal_health(self) -> dict[str, Any]:
+        response = self._orchestrator("GET", "/health")
         response.raise_for_status()
         return response.json()
 
@@ -60,7 +76,7 @@ def parse_list_input(raw: str) -> list[str]:
     return [item.strip() for line in raw.splitlines() for item in line.split(",") if item.strip()]
 
 
-def state_counts(runs: list[dict]) -> dict[str, int]:
+def state_counts(runs: list[dict[str, Any]]) -> dict[str, int]:
     counts = {"success": 0, "running": 0, "queued": 0, "failed": 0}
     for run in runs:
         state = str(run.get("state") or "").lower()
@@ -100,7 +116,7 @@ body { background: radial-gradient(1000px 500px at -5% -20%, rgba(56,189,248,.15
 
 def app_ui() -> None:
     build_css()
-    client = AirflowClient()
+    client = PlatformClient()
 
     ui.colors(primary="#0ea5e9", secondary="#14b8a6", accent="#0f172a")
 
@@ -109,6 +125,7 @@ def app_ui() -> None:
         ui.label("Single entry point for crawling + orchestration + analytics").classes("text-sm text-slate-600")
         ui.separator()
         ui.link("Airflow", "http://localhost:8080", new_tab=True)
+        ui.link("Temporal UI", TEMPORAL_UI_URL, new_tab=True)
         ui.link("Superset", SUPERSET_DASHBOARD_URL, new_tab=True)
         ui.separator()
         ui.label("Credentials: admin / admin").classes("text-sm")
@@ -117,7 +134,7 @@ def app_ui() -> None:
         with ui.card().classes("suite-hero w-full p-4"):
             ui.html("<span class='brand-chip'>Crawler Control Suite</span>")
             ui.label("Crawler Control Center").classes("text-2xl font-bold mt-2")
-            ui.label("NiceGUI edition: premium control surface for run intake, schedule visibility, and data pipeline handoff.").classes("text-base text-cyan-100")
+            ui.label("Temporal-powered orchestration with Airflow execution and Superset analytics.").classes("text-base text-cyan-100")
 
         stat_labels: dict[str, ui.label] = {}
         with ui.row().classes("w-full gap-3"):
@@ -126,11 +143,16 @@ def app_ui() -> None:
                     ui.label(key).classes("text-xs uppercase tracking-wide text-slate-500")
                     stat_labels[key] = ui.label("-").classes("text-xl font-bold text-slate-800")
 
+        temporal_status = ui.html("<div class='text-sm text-slate-700'>Temporal status: checking...</div>")
+
         with ui.row().classes("w-full gap-4 items-start"):
             with ui.card().classes("suite-card p-4 grow"):
                 ui.label("Create Crawl Run").classes("text-lg font-bold")
                 use_env_defaults = ui.checkbox("Use only .env defaults for this run", value=False)
-                urls_input = ui.textarea("Website URLs (comma or newline separated)", value="https://books.toscrape.com/").props("autogrow").classes("w-full")
+                urls_input = ui.textarea(
+                    "Website URLs (comma or newline separated)",
+                    value="https://books.toscrape.com/",
+                ).props("autogrow").classes("w-full")
                 keywords_input = ui.input("Search Keywords (comma separated)", value="").classes("w-full")
                 with ui.row().classes("w-full gap-3"):
                     compartment_input = ui.input("Compartment / Purpose", value="default").classes("grow")
@@ -184,8 +206,9 @@ def app_ui() -> None:
                             "source_config_path": str(schema_path_input.value or "").strip(),
                         }
 
-                        run = client.trigger_run(conf)
-                        ui.notify(f"Triggered: {run.get('dag_run_id')}", color="positive")
+                        run = client.trigger_run_via_temporal(conf)
+                        workflow_id = run.get("workflow_id")
+                        ui.notify(f"Triggered via Temporal: {workflow_id}", color="positive")
                         refresh_data()
                     except Exception as exc:  # noqa: BLE001
                         ui.notify(f"Trigger failed: {exc}", color="negative")
@@ -240,6 +263,16 @@ def app_ui() -> None:
                 stat_labels["Frequency"].set_text(str((details.get("schedule_interval") or {}).get("value", "n/a")))
                 stat_labels["Next Run"].set_text(format_time(details.get("next_dagrun")))
                 stat_labels["Recent Success"].set_text(str(sum(1 for r in runs if (r.get("state") or "").lower() == "success")))
+
+                try:
+                    th = client.temporal_health()
+                    temporal_status.set_content(
+                        f"<div class='text-sm text-slate-700'>Temporal status: <b>{th.get('status','ok')}</b> | task queue: <code>{th.get('task_queue')}</code></div>"
+                    )
+                except Exception as temporal_exc:  # noqa: BLE001
+                    temporal_status.set_content(
+                        f"<div class='text-sm text-red-700'>Temporal status error: {temporal_exc}</div>"
+                    )
 
                 counts = state_counts(runs)
                 pie_chart.options["series"][0]["data"] = [

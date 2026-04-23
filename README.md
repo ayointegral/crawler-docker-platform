@@ -13,7 +13,7 @@ Containerized platform for configurable web crawling, orchestration, data wareho
 - Superset auto-bootstrap:
   - `Crawler Analytics` dashboard (`/superset/dashboard/crawler-analytics/`)
   - `Crawler Platform Overview` dashboard (`/superset/dashboard/crawler-platform-overview/`)
-- Control Center UI (`http://localhost:8501`) on NiceGUI as single entry point.
+- Control Center UI (`http://localhost:8501`) on NiceGUI as single entry point (triggered via Temporal workflows).
 
 ## Services
 - `postgres`
@@ -27,7 +27,10 @@ Containerized platform for configurable web crawling, orchestration, data wareho
 - `superset-init`
 - `superset`
 - `control-ui` (NiceGUI primary)
-- `platform-bootstrap` (automatic first-run DAG trigger for out-of-box data seeding)
+- `temporal` (workflow engine)
+- `temporal-ui`
+- `temporal-orchestrator` (API + worker that starts Temporal workflows and triggers Airflow DAG runs)
+- `platform-bootstrap` (automatic first-run bootstrap workflow trigger for out-of-box data seeding)
 - `control-ui-legacy` (Streamlit fallback, profile `legacy-ui`)
 
 ## Quick Start
@@ -41,6 +44,7 @@ Open:
 - Control UI (NiceGUI): `http://localhost:8501`
 - Airflow: `http://localhost:8080`
 - Superset: `http://localhost:8088`
+- Temporal UI: `http://localhost:8233`
 
 Credentials:
 - Airflow: `admin` / `admin`
@@ -49,9 +53,15 @@ Credentials:
 
 ## Out-of-Box Behavior
 - `docker compose -f compose.yml up --build -d` is enough for first run.
-- `platform-bootstrap` waits for Airflow, unpauses DAG, and triggers one initial run (`bootstrap__initial`) **only when no DAG runs exist yet**.
+- `platform-bootstrap` waits for Airflow + Temporal orchestrator, then triggers one initial Temporal workflow **only when no DAG runs exist yet**.
 - Superset assets are auto-created; data appears once the bootstrap DAG run finishes.
 - Expected first startup time for full stack + initial data: about 2-6 minutes depending on machine/network.
+
+## Orchestration Flow
+- Control UI submits run config to `temporal-orchestrator` (`/workflows/crawl/trigger`).
+- Temporal workflow (`CrawlPipelineWorkflow`) unpauses DAG, triggers run, and tracks workflow metadata.
+- Airflow executes ETL tasks and writes to Postgres.
+- Superset reads warehouse tables and dashboards update.
 
 ## Source Configuration (Schema-Driven)
 Default schema: `crawler/schemas/default_schema.yml`
@@ -84,9 +94,9 @@ Books projection (`analytics.scraped_books`):
 
 ## End-to-End Check
 ```bash
-curl -u admin:admin -X POST 'http://localhost:8080/api/v1/dags/crawler_csv_to_postgres/dagRuns' \
+curl -X POST 'http://localhost:8090/workflows/crawl/trigger' \
   -H 'Content-Type: application/json' \
-  -d '{"conf":{"start_urls":["https://books.toscrape.com/"],"max_pages":1,"compartment":"smoke_test","source_config_path":"/opt/platform/crawler/schemas/default_schema.yml"}}'
+  -d '{"dag_id":"crawler_csv_to_postgres","conf":{"start_urls":["https://books.toscrape.com/"],"max_pages":1,"compartment":"smoke_test","source_config_path":"/opt/platform/crawler/schemas/default_schema.yml"}}'
 
 # Verify warehouse rows
 docker compose -f compose.yml exec -T postgres \

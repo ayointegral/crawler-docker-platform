@@ -5,16 +5,17 @@ This platform is a reusable, schema-driven crawl and analytics stack.
 
 Execution path:
 1. Submit source details from the Control Center UI or Airflow API.
-2. Airflow runs DAG `crawler_csv_to_postgres`.
-3. Crawler writes raw CSV to `data/raw`.
-4. Transform stage validates and normalizes records to `data/processed`.
-5. AI stage enriches rows with clustering and price bands.
-6. Load stage writes to PostgreSQL generic and projection tables.
-7. Superset dashboards query PostgreSQL and visualize results.
+2. Control UI starts a Temporal workflow via `temporal-orchestrator`.
+3. Temporal workflow triggers Airflow DAG `crawler_csv_to_postgres`.
+4. Crawler writes raw CSV to `data/raw`.
+5. Transform stage validates and normalizes records to `data/processed`.
+6. AI stage enriches rows with clustering and price bands.
+7. Load stage writes to PostgreSQL generic and projection tables.
+8. Superset dashboards query PostgreSQL and visualize results.
 
 ## 2. Architecture
 - Crawler: Scrapy-based, config/schema-driven (`crawler/schemas/*.yml`).
-- Orchestration: Apache Airflow with CeleryExecutor.
+- Orchestration: Temporal workflow layer + Apache Airflow (CeleryExecutor) execution layer.
 - Queue/Broker: Redis.
 - Warehouse: PostgreSQL.
 - Visualization: Apache Superset with bootstrap provisioning.
@@ -24,8 +25,10 @@ Execution path:
 - `control-ui (NiceGUI)` -> `http://localhost:8501`
 - `airflow-webserver` -> `http://localhost:8080`
 - `superset` -> `http://localhost:8088`
+- `temporal-ui` -> `http://localhost:8233`
+- `temporal-orchestrator` -> `http://localhost:8090` (internal API, optional host access)
 - `postgres`, `redis`, `airflow-scheduler`, `airflow-worker`, `airflow-triggerer` run internal-only.
-- `platform-bootstrap` auto-triggers first DAG run when no historical runs exist.
+- `platform-bootstrap` auto-triggers first Temporal workflow when no historical DAG runs exist.
 - Optional fallback UI: `control-ui-legacy` on `http://localhost:8502` (profile `legacy-ui`).
 
 ## 4. Credentials
@@ -63,8 +66,9 @@ One-time containers:
 ## 5.1 First-Run Bootstrap
 On a fresh machine (no existing Airflow DAG runs), `platform-bootstrap` automatically:
 1. waits for Airflow API readiness,
-2. unpauses DAG `crawler_csv_to_postgres`,
-3. triggers run `bootstrap__initial` using `.env` crawler defaults.
+2. waits for `temporal-orchestrator` readiness,
+3. starts one Temporal workflow with `.env` crawler defaults,
+4. that workflow unpauses and triggers DAG `crawler_csv_to_postgres`.
 
 If runs already exist, bootstrap trigger is skipped.
 
@@ -86,6 +90,7 @@ Core auth/secrets:
 - `AIRFLOW__WEBSERVER__SECRET_KEY`
 - `AIRFLOW_BOOTSTRAP_ON_STARTUP`
 - `AIRFLOW_BOOTSTRAP_TIMEOUT_SECONDS`
+- `ORCHESTRATOR_BASE_URL` (used internally by bootstrap and UI)
 - `SUPERSET_ADMIN_USERNAME`, `SUPERSET_ADMIN_PASSWORD`
 - `SUPERSET_SECRET_KEY`
 
@@ -145,6 +150,15 @@ curl -u admin:admin -X POST 'http://localhost:8080/api/v1/dags/crawler_csv_to_po
 ```
 
 ## 9. DAG and Scheduling
+
+## 9.1 Temporal Layer
+Temporal workflow: `CrawlPipelineWorkflow` (service: `temporal-orchestrator`)
+- Activity 1: unpause Airflow DAG
+- Activity 2: trigger Airflow DAG run
+- Activity 3: optional wait for DAG completion
+
+Control Center uses Temporal by default for manual run triggering.
+
 DAG: `crawler_csv_to_postgres`
 
 Task chain:
@@ -221,14 +235,20 @@ Validation completed on April 23, 2026.
 ### 13.1 Health/API checks
 ```bash
 curl -sSf http://localhost:8501 >/dev/null
+curl -sSf http://localhost:8233 >/dev/null
+curl -sSf http://localhost:8090/health >/dev/null
 curl -sSf http://localhost:8080/health >/dev/null
 curl -sSf -u admin:admin http://localhost:8080/api/v1/dags/crawler_csv_to_postgres/details >/dev/null
 curl -sSf http://localhost:8088/health >/dev/null
 ```
 
 ### 13.2 Triggered and completed manual run
-Run id example:
-- `manual__2026-04-23T09:48:47.620446+00:00`
+Temporal workflow example:
+- `crawl-395edb820a334e0e`
+
+Airflow run ids observed:
+- `manual__2026-04-23T10:43:08.470582+00:00`
+- `manual__2026-04-23T10:43:10.946768+00:00`
 
 State reached: `success`.
 
@@ -241,7 +261,7 @@ ORDER BY 2 DESC;
 ```
 Observed compartments include:
 - `env_watch`
-- `manual_ui_test`
+- `temporal_manual`
 
 ### 13.4 Superset metadata proof
 ```sql

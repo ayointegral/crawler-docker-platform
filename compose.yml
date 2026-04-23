@@ -31,6 +31,65 @@ services:
     networks:
       - crawler-net
 
+  temporal:
+    image: temporalio/auto-setup:1.25.2
+    container_name: temporal
+    restart: unless-stopped
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_SEEDS: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-platform}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:-platform}
+      DBNAME: temporal
+      VISIBILITY_DBNAME: temporal_visibility
+    ports:
+      - "7233:7233"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - crawler-net
+
+  temporal-ui:
+    image: temporalio/ui:2.31.2
+    container_name: temporal-ui
+    restart: unless-stopped
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_UI_PORT: 8080
+      TEMPORAL_CORS_ORIGINS: http://localhost:8233
+    ports:
+      - "8233:8080"
+    depends_on:
+      temporal:
+        condition: service_started
+    networks:
+      - crawler-net
+
+  temporal-orchestrator:
+    build:
+      context: ./temporal_orchestrator
+    container_name: temporal-orchestrator
+    restart: unless-stopped
+    environment:
+      AIRFLOW_BASE_URL: http://airflow-webserver:8080
+      AIRFLOW_USERNAME: ${AIRFLOW_ADMIN_USERNAME:-admin}
+      AIRFLOW_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin}
+      AIRFLOW_DAG_ID: crawler_csv_to_postgres
+      TEMPORAL_SERVER: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_TASK_QUEUE: crawler-task-queue
+    ports:
+      - "8090:8090"
+    depends_on:
+      temporal:
+        condition: service_started
+      airflow-webserver:
+        condition: service_started
+    networks:
+      - crawler-net
+
   airflow-init:
     build:
       context: ./pipeline
@@ -118,9 +177,12 @@ services:
       CRAWLER_MAX_PAGES: ${CRAWLER_MAX_PAGES:-2}
       CRAWLER_COMPARTMENT: ${CRAWLER_COMPARTMENT:-bootstrap}
       CRAWLER_SOURCE_CONFIG: ${CRAWLER_SOURCE_CONFIG:-/opt/platform/crawler/schemas/default_schema.yml}
+      ORCHESTRATOR_BASE_URL: http://temporal-orchestrator:8090
     volumes:
       - ./scripts:/opt/platform/scripts:ro
     depends_on:
+      temporal-orchestrator:
+        condition: service_started
       airflow-webserver:
         condition: service_started
     networks:
@@ -261,6 +323,8 @@ services:
       AIRFLOW_BASE_URL: http://airflow-webserver:8080
       AIRFLOW_USERNAME: ${AIRFLOW_ADMIN_USERNAME:-admin}
       AIRFLOW_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin}
+      ORCHESTRATOR_BASE_URL: ${ORCHESTRATOR_BASE_URL:-http://temporal-orchestrator:8090}
+      TEMPORAL_UI_URL: ${TEMPORAL_UI_URL:-http://localhost:8233}
       SUPERSET_DASHBOARD_URL: http://localhost:8088/superset/dashboard/crawler-analytics/
     ports:
       - "8501:8501"
@@ -268,6 +332,8 @@ services:
       - ./ui_nicegui:/app
     depends_on:
       airflow-webserver:
+        condition: service_started
+      temporal-orchestrator:
         condition: service_started
       superset:
         condition: service_started

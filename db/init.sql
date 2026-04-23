@@ -1,3 +1,5 @@
+CREATE DATABASE temporal;
+CREATE DATABASE temporal_visibility;
 CREATE DATABASE analytics;
 CREATE DATABASE superset_metadata;
 \connect analytics
