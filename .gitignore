@@ -1,0 +1,15 @@
+.env
+.playwright-mcp/
+.swarm/
+.sisyphus/
+
+__pycache__/
+*.pyc
+
+data/raw/*.csv
+data/processed/*.csv
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+ui-test-*.png
+superset-dashboard-crawler-analytics.png
