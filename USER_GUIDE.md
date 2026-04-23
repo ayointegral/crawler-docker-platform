@@ -18,13 +18,14 @@ Execution path:
 - Queue/Broker: Redis.
 - Warehouse: PostgreSQL.
 - Visualization: Apache Superset with bootstrap provisioning.
-- Operator Web UI: Streamlit Control Center.
+- Operator Web UI: NiceGUI Control Center.
 
 ## 3. Services and Ports
-- `control-ui` -> `http://localhost:8501`
+- `control-ui (NiceGUI)` -> `http://localhost:8501`
 - `airflow-webserver` -> `http://localhost:8080`
 - `superset` -> `http://localhost:8088`
 - `postgres`, `redis`, `airflow-scheduler`, `airflow-worker`, `airflow-triggerer` run internal-only.
+- Optional fallback UI: `control-ui-legacy` on `http://localhost:8502` (profile `legacy-ui`).
 
 ## 4. Credentials
 - Airflow: `admin` / `admin`
@@ -324,5 +325,12 @@ docker compose -f compose.yml restart
 - Add RBAC controls per dataset/domain.
 - Add backup/retention for warehouse tables.
 
-## 20. Documentation TODO
+## 20. Legacy UI Fallback
+Start Streamlit fallback only when needed:
+```bash
+docker compose -f compose.yml --profile legacy-ui up -d control-ui-legacy
+```
+Then open `http://localhost:8502`.
+
+## 21. Documentation TODO
 - Keep this guide comprehensive and aligned with current compose services, DAG flow, schemas, and Superset assets after every change.

@@ -230,7 +230,7 @@ services:
 
   control-ui:
     build:
-      context: ./ui
+      context: ./ui_nicegui
     container_name: crawler-control-ui
     environment:
       AIRFLOW_DAG_ID: ${AIRFLOW_BOOTSTRAP_DAG_ID:-crawler_csv_to_postgres}
@@ -241,6 +241,28 @@ services:
     ports:
       - "8501:8501"
     volumes:
+      - ./ui_nicegui:/app
+    depends_on:
+      airflow-webserver:
+        condition: service_started
+      superset:
+        condition: service_started
+    networks:
+      - crawler-net
+
+  control-ui-legacy:
+    build:
+      context: ./ui
+    container_name: crawler-control-ui-legacy
+    environment:
+      AIRFLOW_DAG_ID: ${AIRFLOW_BOOTSTRAP_DAG_ID:-crawler_csv_to_postgres}
+      AIRFLOW_BASE_URL: http://airflow-webserver:8080
+      AIRFLOW_USERNAME: ${AIRFLOW_ADMIN_USERNAME:-admin}
+      AIRFLOW_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin}
+      SUPERSET_DASHBOARD_URL: http://localhost:8088/superset/dashboard/crawler-analytics/
+    ports:
+      - "8502:8501"
+    volumes:
       - ./ui:/app
     depends_on:
       airflow-webserver:
@@ -249,6 +271,7 @@ services:
         condition: service_started
     networks:
       - crawler-net
+    profiles: ["legacy-ui"]
 
 volumes:
   postgres_data:

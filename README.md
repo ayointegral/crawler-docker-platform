@@ -13,7 +13,7 @@ Containerized platform for configurable web crawling, orchestration, data wareho
 - Superset auto-bootstrap:
   - `Crawler Analytics` dashboard (`/superset/dashboard/crawler-analytics/`)
   - `Crawler Platform Overview` dashboard (`/superset/dashboard/crawler-platform-overview/`)
-- Control Center UI (`http://localhost:8501`) as single entry point.
+- Control Center UI (`http://localhost:8501`) on NiceGUI as single entry point.
 
 ## Services
 - `postgres`
@@ -26,7 +26,8 @@ Containerized platform for configurable web crawling, orchestration, data wareho
 - `crawler` (manual profile)
 - `superset-init`
 - `superset`
-- `control-ui`
+- `control-ui` (NiceGUI primary)
+- `control-ui-legacy` (Streamlit fallback, profile `legacy-ui`)
 
 ## Quick Start
 ```bash
@@ -36,7 +37,7 @@ docker compose -f compose.yml ps
 ```
 
 Open:
-- Control UI: `http://localhost:8501`
+- Control UI (NiceGUI): `http://localhost:8501`
 - Airflow: `http://localhost:8080`
 - Superset: `http://localhost:8088`
 
@@ -86,6 +87,12 @@ docker compose -f compose.yml exec -T postgres \
 
 ## Documentation
 - Full operator/developer guide: `USER_GUIDE.md`
+
+## Legacy UI Fallback
+```bash
+docker compose -f compose.yml --profile legacy-ui up -d control-ui-legacy
+```
+Open `http://localhost:8502`.
 
 ## TODO (Tracked)
 - Keep `USER_GUIDE.md` comprehensive and updated after each architecture or workflow change.
