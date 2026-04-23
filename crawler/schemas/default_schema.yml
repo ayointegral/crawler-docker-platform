@@ -1,0 +1,39 @@
+dataset_name: books
+record_selector:
+  type: css
+  query: article.product_pod
+detail_link_selector:
+  type: css
+  query: h3 a::attr(href)
+pagination_selector:
+  type: css
+  query: li.next a::attr(href)
+fields:
+  - name: title
+    data_type: string
+    selector:
+      type: css
+      query: h3 a::attr(title)
+  - name: price
+    data_type: number
+    selector:
+      type: css
+      query: p.price_color::text
+    regex: "([0-9]+(?:\\.[0-9]+)?)"
+  - name: rating
+    data_type: integer
+    selector:
+      type: css
+      query: p.star-rating::attr(class)
+    regex: "(One|Two|Three|Four|Five)"
+    value_map:
+      One: 1
+      Two: 2
+      Three: 3
+      Four: 4
+      Five: 5
+  - name: availability_text
+    data_type: string
+    selector:
+      type: css
+      query: p.instock.availability::text

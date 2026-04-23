@@ -1,325 +1,328 @@
-# User Guide: Dockerized Crawler Platform
+# User Guide: Data Ingestion and Analysis Platform
 
 ## 1. Overview
+This platform is a reusable, schema-driven crawl and analytics stack.
 
-This platform is a batch crawl-and-analytics stack with one operator entrypoint.
+Execution path:
+1. Submit source details from the Control Center UI or Airflow API.
+2. Airflow runs DAG `crawler_csv_to_postgres`.
+3. Crawler writes raw CSV to `data/raw`.
+4. Transform stage validates and normalizes records to `data/processed`.
+5. AI stage enriches rows with clustering and price bands.
+6. Load stage writes to PostgreSQL generic and projection tables.
+7. Superset dashboards query PostgreSQL and visualize results.
 
-Flow:
-1. Submit crawl inputs in Control Center.
-2. Airflow triggers DAG `crawler_csv_to_postgres`.
-3. Crawler writes per-run raw CSV.
-4. Transform step cleans and normalizes data.
-5. Load step upserts to PostgreSQL.
-6. Superset dashboard reads the warehouse table.
-
-## 2. Single Entry Point
-
-Use `http://localhost:8501` (`Crawler Control Center`) for day-to-day operations:
-- submit `start_urls`
-- submit optional `keywords`
-- submit `compartment` / purpose label
-- set `max_pages`
-- trigger manual DAG runs
-- pause/unpause DAG
-- view schedule/frequency and recent run states
+## 2. Architecture
+- Crawler: Scrapy-based, config/schema-driven (`crawler/schemas/*.yml`).
+- Orchestration: Apache Airflow with CeleryExecutor.
+- Queue/Broker: Redis.
+- Warehouse: PostgreSQL.
+- Visualization: Apache Superset with bootstrap provisioning.
+- Operator Web UI: Streamlit Control Center.
 
 ## 3. Services and Ports
-
-- `control-ui`: `8501` (operator UI)
-- `airflow-webserver`: `8080` (scheduler UI/API)
-- `airflow-scheduler`: no host port (worker/scheduler)
-- `airflow-triggerer`: no host port (triggerer runtime)
-- `superset`: `8088` (analytics UI)
-- `postgres`: no host port (internal DB)
-- `airflow-init`, `superset-init`: one-time bootstrap containers
-- `crawler`: manual profile-only utility container
+- `control-ui` -> `http://localhost:8501`
+- `airflow-webserver` -> `http://localhost:8080`
+- `superset` -> `http://localhost:8088`
+- `postgres`, `redis`, `airflow-scheduler`, `airflow-worker`, `airflow-triggerer` run internal-only.
 
 ## 4. Credentials
-
 - Airflow: `admin` / `admin`
 - Superset: `admin` / `admin`
 - Postgres app user: `platform` / `platform`
 
-Postgres DB names:
-- `airflow`
-- `analytics`
-- `superset_metadata`
+Databases:
+- `airflow` (Airflow metadata)
+- `analytics` (warehouse)
+- `superset_metadata` (Superset metadata)
 
-## 5. Start and Health Check
-
-Start:
+## 5. Start the Stack
 ```bash
 cp .env.example .env
 docker compose -f compose.yml up --build -d
-```
-
-Update `.env` first if you want different default URL lists, keywords, page limits, or compartment labels.
-
-First-run bootstrap:
-- If there are no runs yet for `crawler_csv_to_postgres`, `airflow-init` auto-triggers `bootstrap__initial`.
-- This seeds initial data so Superset charts populate without manual triggering.
-- If runs already exist, bootstrap is skipped.
-
-Check service state:
-```bash
 docker compose -f compose.yml ps
 ```
 
-Expected running services:
-- `crawler-control-ui`
+Expected main running containers:
+- `crawler-postgres`
+- `crawler-redis`
 - `airflow-webserver`
 - `airflow-scheduler`
+- `airflow-worker`
 - `airflow-triggerer`
-- `crawler-postgres`
 - `superset`
+- `crawler-control-ui`
 
-## 6. Daily Operations (Recommended)
+One-time containers:
+- `airflow-init`
+- `superset-init`
 
-1. Open `http://localhost:8501`.
-2. Enter website URLs (comma or newline separated).
-3. Add optional keywords (comma separated).
-4. Set compartment/purpose (for example `pricing_watch`, `seo_research`).
-5. Set max pages.
-6. Click `Trigger Crawl Run`.
-7. Monitor run state in the `Recent Runs` table.
-8. Open Superset dashboard from the sidebar quick link.
-
-## 7. Orchestration and Schedule Details
-
-Airflow DAG:
-- ID: `crawler_csv_to_postgres`
-- schedule: `@daily`
-- catchup: `false`
-- max active runs: `1`
-- retries: `2`
-- retry delay: `2 minutes`
-
-Task chain:
-- `crawl_books_site` -> `transform_csv` -> `load_postgres`
-
-Per-run file outputs:
-- raw: `data/raw/books_raw_<run_id>.csv`
-- processed: `data/processed/books_clean_<run_id>.csv`
-
-## 8. Airflow CLI Operations
-
-Unpause and trigger:
+## 6. Environment Defaults
+Always create `.env` from sample first:
 ```bash
-docker compose -f compose.yml exec -T airflow-webserver airflow dags unpause crawler_csv_to_postgres
-docker compose -f compose.yml exec -T airflow-webserver airflow dags trigger crawler_csv_to_postgres
+cp .env.example .env
 ```
 
-List runs:
-```bash
-docker compose -f compose.yml exec -T airflow-webserver \
-  airflow dags list-runs -d crawler_csv_to_postgres --no-backfill --output table
-```
-
-Task states for a run:
-```bash
-docker compose -f compose.yml exec -T airflow-webserver \
-  airflow tasks states-for-dag-run crawler_csv_to_postgres <RUN_ID>
-```
-
-## 9. Data Validation and Warehouse Checks
-
-Inspect CSV outputs:
-```bash
-ls -lh data/raw data/processed
-```
-
-Warehouse row count:
-```bash
-docker compose -f compose.yml exec -T postgres \
-  psql -U platform -d analytics -c "SELECT COUNT(*) AS rows_loaded FROM scraped_books;"
-```
-
-Recent loaded rows:
-```bash
-docker compose -f compose.yml exec -T postgres \
-  psql -U platform -d analytics -c "SELECT title, price, rating, loaded_at FROM scraped_books ORDER BY loaded_at DESC LIMIT 20;"
-```
-
-## 10. Superset Provisioning and Dashboard
-
-Superset assets are auto-seeded by `superset/bootstrap_superset.py`:
-- Database: `analytics_warehouse`
-- Dataset: `scraped_books`
-- Charts:
-  - `Rows by Compartment`
-  - `Rating Distribution (Pie)`
-  - `Average Price by Rating`
-  - `Average Price by Compartment`
-  - `Rows by Scrape Day`
-  - `Top Expensive Books`
-- Dashboard:
-  - title: `Crawler Analytics`
-  - slug: `crawler-analytics`
-  - URL: `http://localhost:8088/superset/dashboard/crawler-analytics/`
-
-Re-run bootstrap manually:
-```bash
-docker compose -f compose.yml exec -T superset python /app/pythonpath/bootstrap_superset.py
-```
-
-## 11. Runtime Inputs and Configuration
-
-Runtime inputs from Control Center form:
-- `start_urls` (list)
-- `keywords` (list)
-- `compartment` (string label used for data compartmentalization)
-- `max_pages` (int)
-
-Environment defaults in `compose.yml`:
+Core crawler defaults in `.env`:
 - `CRAWLER_START_URLS`
 - `CRAWLER_KEYWORDS`
 - `CRAWLER_MAX_PAGES`
 - `CRAWLER_COMPARTMENT`
-- `AIRFLOW_BOOTSTRAP_ON_STARTUP`
-- `AIRFLOW_BOOTSTRAP_DAG_ID`
-- `OUTPUT_FILE`
-- `RAW_CSV_PATH`
-- `PROCESSED_CSV_PATH`
-- `WAREHOUSE_DSN`
+- `CRAWLER_SOURCE_CONFIG`
 
-Behavior notes:
-- Runtime form values override defaults for that DAG run.
-- If no keywords are provided, all parsed items are eligible.
-- Loader is idempotent via `ON CONFLICT (source_url, compartment) DO UPDATE`.
+Core auth/secrets:
+- `AIRFLOW_ADMIN_USERNAME`, `AIRFLOW_ADMIN_PASSWORD`
+- `AIRFLOW__WEBSERVER__SECRET_KEY`
+- `SUPERSET_ADMIN_USERNAME`, `SUPERSET_ADMIN_PASSWORD`
+- `SUPERSET_SECRET_KEY`
 
-Use `.env` for default URL list and purpose:
+## 7. Schema-Driven Crawling
+### 7.1 Schema location
+- Default schema: `crawler/schemas/default_schema.yml`
+- Example alternate schema: `crawler/schemas/articles_schema.yml`
+
+### 7.2 Schema format
+Required keys:
+- `dataset_name`
+- `record_selector`
+- `fields`
+
+Optional keys:
+- `detail_link_selector`
+- `pagination_selector`
+
+Each field includes:
+- `name`
+- `data_type`
+- `selector` (`css` or `xpath`)
+- optional `regex`
+- optional `value_map`
+
+### 7.3 Example
+`crawler/schemas/default_schema.yml` maps `books.toscrape.com` cards and extracts:
+- `title`
+- `price`
+- `rating`
+- `availability_text`
+
+## 8. How to Trigger Runs
+### 8.1 Control Center UI (recommended)
+Open `http://localhost:8501` and use the form:
+- Website URLs
+- Keywords
+- Max pages
+- Compartment/purpose
+- Source schema path
+
+You can also tick `Use only .env defaults for this run`.
+
+### 8.2 Airflow API
 ```bash
-cp .env.example .env
+curl -u admin:admin -X POST 'http://localhost:8080/api/v1/dags/crawler_csv_to_postgres/dagRuns' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "conf": {
+      "start_urls": ["https://books.toscrape.com/"],
+      "keywords": [],
+      "max_pages": 1,
+      "compartment": "manual_ui_test",
+      "source_config_path": "/opt/platform/crawler/schemas/default_schema.yml"
+    }
+  }'
 ```
 
-Example `.env` values:
+## 9. DAG and Scheduling
+DAG: `crawler_csv_to_postgres`
+
+Task chain:
+- `crawl_books_site`
+- `transform_csv`
+- `ai_enrich_csv`
+- `load_postgres`
+
+Defaults:
+- schedule: `@daily`
+- retries: `2`
+- retry delay: `2 minutes`
+- catchup: `false`
+- max active runs: `1`
+
+## 10. Storage Layout
+Per-run CSV naming includes dataset + run id:
+- Raw: `data/raw/<dataset>_raw_<run_id>.csv`
+- Processed: `data/processed/<dataset>_clean_<run_id>.csv`
+
+## 11. Warehouse Model
+### 11.1 Generic table
+`analytics.scraped_records`
+- `dataset_name`
+- `compartment`
+- `source_url`
+- `source_domain`
+- `schema_path`
+- `payload` (`JSONB`)
+- `ai_cluster_id`
+- `ai_cluster_label`
+- `ai_price_band`
+- `scraped_at`
+- `loaded_at`
+
+Uniqueness:
+- `(dataset_name, compartment, source_url)`
+
+### 11.2 Projection table
+`analytics.scraped_books`
+- Populated when required book fields exist (`title`, `price`, `rating`, etc.)
+- Used by book-focused charts.
+
+### 11.3 Dataset views
+Loader auto-creates:
+- `vw_dataset_<dataset_name>`
+
+Example:
+- `vw_dataset_books`
+
+## 12. Superset Provisioning
+Bootstrap script: `superset/bootstrap_superset.py`
+
+Creates/updates:
+- Database connection: `analytics_warehouse`
+- Datasets:
+  - `scraped_records`
+  - `scraped_books`
+  - any `vw_dataset_*` views
+- Dashboards:
+  - `Crawler Analytics` (`/superset/dashboard/crawler-analytics/`)
+  - `Crawler Platform Overview` (`/superset/dashboard/crawler-platform-overview/`)
+
+Charts include bars, line charts, and pie/donut charts.
+
+Re-run bootstrap:
 ```bash
-CRAWLER_START_URLS=https://books.toscrape.com/
-CRAWLER_KEYWORDS=
-CRAWLER_MAX_PAGES=2
-CRAWLER_COMPARTMENT=env_watch
-AIRFLOW_BOOTSTRAP_ON_STARTUP=true
-AIRFLOW_BOOTSTRAP_DAG_ID=crawler_csv_to_postgres
+docker compose -f compose.yml exec -T superset python /app/pythonpath/bootstrap_superset.py
 ```
 
-## 12. Compartmented Data Model
+## 13. Real Service-to-Service Validation (Executed)
+Validation completed on April 23, 2026.
 
-Warehouse table: `analytics.scraped_books`
-- `source_domain` captures the source host (for example `books.toscrape.com`)
-- `compartment` captures the scrape purpose/domain label
-- uniqueness is enforced by `source_url + compartment`
+### 13.1 Health/API checks
+```bash
+curl -sSf http://localhost:8501 >/dev/null
+curl -sSf http://localhost:8080/health >/dev/null
+curl -sSf -u admin:admin http://localhost:8080/api/v1/dags/crawler_csv_to_postgres/details >/dev/null
+curl -sSf http://localhost:8088/health >/dev/null
+```
 
-Useful query:
+### 13.2 Triggered and completed manual run
+Run id example:
+- `manual__2026-04-23T09:48:47.620446+00:00`
+
+State reached: `success`.
+
+### 13.3 Warehouse proof
 ```sql
-SELECT compartment, source_domain, COUNT(*) AS rows
-FROM scraped_books
-GROUP BY compartment, source_domain
-ORDER BY rows DESC;
+SELECT compartment, COUNT(*)
+FROM scraped_records
+GROUP BY compartment
+ORDER BY 2 DESC;
 ```
+Observed compartments include:
+- `env_watch`
+- `manual_ui_test`
 
-## 13. End-to-End Validation (Verified)
-
-Verified path A (`.env` defaults -> Airflow DAG):
-```bash
-docker compose -f compose.yml exec -T airflow-webserver env | egrep 'CRAWLER_START_URLS|CRAWLER_COMPARTMENT'
-docker compose -f compose.yml exec -T airflow-webserver airflow dags trigger crawler_csv_to_postgres
+### 13.4 Superset metadata proof
+```sql
+SELECT slug, dashboard_title FROM dashboards ORDER BY slug;
+SELECT slice_name, viz_type FROM slices ORDER BY slice_name;
 ```
+Observed dashboards:
+- `crawler-analytics`
+- `crawler-platform-overview`
 
-Verified path B (Control Center UI -> Airflow DAG conf):
-- Submit `start_urls`, `keywords`, `compartment`, `max_pages` in `http://localhost:8501`
-- Confirm success message and run id in UI
+Observed charts include:
+- `Rows by Dataset`
+- `Rows by Compartment (Pie)`
+- `Rows by Source Domain`
+- `Rows by AI Cluster`
+- `Top Expensive Books`
 
-Verified outputs:
-```bash
-ls -1t data/raw | head -n 3
-ls -1t data/processed | head -n 3
-```
+## 14. Adding a New Use Case in ~10 Minutes
+1. Create schema file in `crawler/schemas/` (for example `my_site.yml`).
+2. Set `dataset_name` and selectors in schema.
+3. Trigger DAG from UI with:
+- your URLs
+- compartment label
+- `source_config_path=/opt/platform/crawler/schemas/my_site.yml`
+4. Wait for DAG success.
+5. Re-run Superset bootstrap.
+6. Open `Crawler Platform Overview` to confirm dataset rows.
 
-Database proof query:
-```bash
-docker compose -f compose.yml exec -T postgres \
-  psql -U platform -d analytics -c "SELECT compartment, source_domain, COUNT(*) AS rows FROM scraped_books GROUP BY compartment, source_domain ORDER BY rows DESC;"
-```
-
-Superset proof:
-- Re-seed dashboard assets: `docker compose -f compose.yml exec -T superset python /app/pythonpath/bootstrap_superset.py`
-- Open `http://localhost:8088/superset/dashboard/crawler-analytics/`
-- Confirm compartment charts are visible:
-  - `Rows by Compartment`
-  - `Average Price by Compartment`
-
-## 14. Logs and Monitoring
-
+## 15. Operations and Logs
 All logs:
 ```bash
 docker compose -f compose.yml logs -f
 ```
 
-Core service logs:
+Focused logs:
 ```bash
-docker compose -f compose.yml logs -f control-ui
 docker compose -f compose.yml logs -f airflow-scheduler
-docker compose -f compose.yml logs -f airflow-triggerer
+docker compose -f compose.yml logs -f airflow-worker
 docker compose -f compose.yml logs -f airflow-webserver
+docker compose -f compose.yml logs -f airflow-triggerer
 docker compose -f compose.yml logs -f superset
+docker compose -f compose.yml logs -f control-ui
 docker compose -f compose.yml logs -f postgres
 ```
 
-Recent error scan:
+Scan for failures:
 ```bash
-docker compose -f compose.yml logs --tail=300 \
-  control-ui airflow-webserver airflow-scheduler airflow-triggerer postgres superset \
-  | egrep -i "error|fatal|traceback|exception"
+docker compose -f compose.yml logs --tail=400 \
+  airflow-webserver airflow-scheduler airflow-worker airflow-triggerer superset control-ui postgres \
+  | egrep -i "error|fatal|traceback|exception|forbidden|name or service not known"
 ```
 
-## 15. Troubleshooting
+## 16. Known Behavior
+- If a run returns zero records (for example strict keyword filter), transform stage now writes an empty processed CSV and pipeline continues without hard failure.
+- Superset dashboard route usually returns HTTP `302` until logged in.
 
-`Control Center` cannot trigger runs:
-- check `airflow-webserver` status with `docker compose -f compose.yml ps`
-- verify credentials in `compose.yml` for `control-ui`
-- verify Airflow API auth backend is basic auth
+## 17. Troubleshooting
+### Airflow logs inaccessible (`403 FORBIDDEN`)
+- Ensure all Airflow components share `AIRFLOW__WEBSERVER__SECRET_KEY`.
+- Restart all Airflow services after secret change.
+- Ensure host/container times are synchronized.
 
-DAG remains queued:
-- confirm `airflow-scheduler` is running
-- confirm `airflow-triggerer` is running
-- unpause DAG from Control Center or Airflow UI
-- check scheduler logs for task import errors
+### DAG run stuck
+- Check `airflow-scheduler` and `airflow-worker` logs.
+- Confirm DAG is unpaused in Control UI or Airflow UI.
 
-Airflow task logs return `403 FORBIDDEN` from `/log/...`:
-- ensure all Airflow components share the same `AIRFLOW__WEBSERVER__SECRET_KEY`
-- restart `airflow-webserver`, `airflow-scheduler`, and `airflow-triggerer` after secret changes
-- verify host time is synchronized (required for signed log access tokens)
+### Superset dashboards missing datasets/charts
+- Ensure at least one successful load to warehouse.
+- Re-run Superset bootstrap script.
 
-Superset opens but dashboard is missing charts:
-- run bootstrap script again
-- refresh dashboard page after bootstrap finishes
-- check `superset` logs for metadata DB connectivity errors
-
-Need clean reset:
+### Want clean reset
 ```bash
 docker compose -f compose.yml down -v
 rm -f data/raw/*.csv data/processed/*.csv
 docker compose -f compose.yml up --build -d
 ```
 
-## 16. Stop and Restart
-
-Stop stack:
+## 18. Stop/Restart
+Stop:
 ```bash
 docker compose -f compose.yml down
 ```
 
-Restart running services:
+Restart:
 ```bash
 docker compose -f compose.yml restart
 ```
 
-## 17. Production Hardening Checklist
+## 19. Hardening Checklist
+- Replace default credentials and secrets.
+- Add CSP and Superset production configs.
+- Use external secret manager.
+- Add RBAC controls per dataset/domain.
+- Add backup/retention for warehouse tables.
 
-- Replace default credentials and secret keys.
-- Move secrets to a secret manager.
-- Add reverse proxy and TLS.
-- Add metrics/alerts and central logging.
-- Use Airflow remote logging backend.
-- Configure Superset CSP and external rate limiter store.
-- Add CI for lint, tests, and image scanning.
+## 20. Documentation TODO
+- Keep this guide comprehensive and aligned with current compose services, DAG flow, schemas, and Superset assets after every change.

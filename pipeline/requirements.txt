@@ -1,4 +1,6 @@
-pandas==2.2.2
+pandas==2.1.4
 SQLAlchemy==1.4.52
 psycopg2-binary==2.9.9
 Scrapy==2.11.2
+scikit-learn==1.5.2
+PyYAML==6.0.2

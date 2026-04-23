@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from datetime import datetime, timezone
 
@@ -53,6 +52,7 @@ def trigger_run(
     keywords: list[str],
     max_pages: int | None,
     compartment: str,
+    source_config_path: str,
 ) -> dict:
     payload = {
         "conf": {
@@ -60,6 +60,7 @@ def trigger_run(
             "keywords": keywords,
             "max_pages": max_pages,
             "compartment": compartment,
+            "source_config_path": source_config_path,
         }
     }
     response = _airflow_request("POST", f"/api/v1/dags/{DAG_ID}/dagRuns", json=payload)
@@ -77,13 +78,17 @@ def _format_time(value: str | None) -> str:
         return value
 
 
+def _parse_list_input(value: str) -> list[str]:
+    return [item.strip() for line in value.splitlines() for item in line.split(",") if item.strip()]
+
+
 st.set_page_config(page_title="Crawler Control Center", layout="wide")
 st.title("Crawler Control Center")
-st.caption("Single entry point for crawl input, orchestration visibility, and run frequency monitoring")
+st.caption("Single entry point for crawl input, schema config, scheduling, and pipeline status")
 
 with st.sidebar:
     st.subheader("Quick Links")
-    st.markdown(f"- Airflow: [http://localhost:8080](http://localhost:8080)")
+    st.markdown("- Airflow: [http://localhost:8080](http://localhost:8080)")
     st.markdown(f"- Superset Dashboard: [{SUPERSET_DASHBOARD_URL}]({SUPERSET_DASHBOARD_URL})")
     st.markdown("- Credentials: admin / admin")
 
@@ -115,40 +120,61 @@ if controls_col2.button("Pause DAG", use_container_width=True):
     st.rerun()
 
 st.divider()
-
 st.subheader("Create Crawl Run")
+
 with st.form("crawl_form"):
+    use_env_defaults = st.checkbox(
+        "Use only .env defaults for this run",
+        value=False,
+        help="If checked, runtime URL/keyword/page fields are ignored and Airflow uses compose/.env defaults.",
+    )
     urls_input = st.text_area(
         "Website URLs (comma or newline separated)",
         value="https://books.toscrape.com/",
         help="Each URL becomes a crawl seed URL.",
+        disabled=use_env_defaults,
     )
     keywords_input = st.text_input(
         "Search Keywords (comma separated)",
         value="",
-        help="Optional title filter. Example: science, history",
+        help="Optional keyword filter, usually against title/name-like fields.",
+        disabled=use_env_defaults,
     )
     compartment_input = st.text_input(
         "Compartment / Purpose",
         value="default",
-        help="Use a label to separate data domains (example: pricing_watch, seo_research, competitor_scan).",
+        help="Logical partition label: pricing_watch, seo_research, competitor_scan.",
     )
-    max_pages = st.number_input("Max pages per run", min_value=1, max_value=200, value=10, step=1)
+    max_pages = st.number_input(
+        "Max pages per run",
+        min_value=1,
+        max_value=200,
+        value=10,
+        step=1,
+        disabled=use_env_defaults,
+    )
+    source_config_path = st.text_input(
+        "Crawler schema/source config path",
+        value="/opt/platform/crawler/schemas/default_schema.yml",
+        help="Path inside Airflow containers. Keep default for books demo or point to your own YAML schema.",
+    )
     submitted = st.form_submit_button("Trigger Crawl Run", use_container_width=True)
 
 if submitted:
-    start_urls = [item.strip() for chunk in urls_input.splitlines() for item in chunk.split(",") if item.strip()]
-    keywords = [item.strip() for item in keywords_input.split(",") if item.strip()]
+    start_urls = [] if use_env_defaults else _parse_list_input(urls_input)
+    keywords = [] if use_env_defaults else [item.strip() for item in keywords_input.split(",") if item.strip()]
     compartment = compartment_input.strip() or "default"
-    if not start_urls:
-        st.error("Please provide at least one URL")
+
+    if not use_env_defaults and not start_urls:
+        st.error("Please provide at least one URL or check 'Use only .env defaults'.")
     else:
         try:
             run = trigger_run(
                 start_urls=start_urls,
                 keywords=keywords,
-                max_pages=int(max_pages),
+                max_pages=(None if use_env_defaults else int(max_pages)),
                 compartment=compartment,
+                source_config_path=source_config_path.strip(),
             )
             st.success(f"Triggered DAG run: {run.get('dag_run_id')}")
             st.json(run)
@@ -174,6 +200,7 @@ if runs:
                 "keywords": ", ".join(conf.get("keywords") or []),
                 "max_pages": conf.get("max_pages"),
                 "compartment": conf.get("compartment", "default"),
+                "source_config_path": conf.get("source_config_path", "(env/default)"),
             }
         )
     frame = pd.DataFrame(rows)
@@ -184,11 +211,12 @@ else:
 with st.expander("How It Works"):
     st.markdown(
         """
-1. You submit URLs + keywords + max pages here.
-2. This UI triggers Airflow DAG `crawler_csv_to_postgres` via Airflow REST API.
-3. Each run can be tagged with a compartment/purpose for data separation.
-4. DAG runs crawler -> transform -> load.
-5. Superset dashboard updates from PostgreSQL data.
-6. Frequency is controlled by DAG schedule (`@daily` currently), shown above.
+1. Submit URL list and a source schema path (or use `.env` defaults).
+2. UI triggers Airflow DAG `crawler_csv_to_postgres` via Airflow REST API.
+3. DAG runs `crawl -> transform -> ai_enrich -> load`.
+4. Records load into generic warehouse table `scraped_records` (all datasets).
+5. If records have book-compatible fields, they also project into `scraped_books`.
+6. Superset reads warehouse tables and dashboards update from Postgres.
+7. Frequency is controlled by DAG schedule (`@daily` by default).
         """.strip()
     )

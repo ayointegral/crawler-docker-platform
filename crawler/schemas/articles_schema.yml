@@ -1,0 +1,28 @@
+dataset_name: articles
+record_selector:
+  type: css
+  query: article
+pagination_selector:
+  type: css
+  query: a.next::attr(href)
+fields:
+  - name: title
+    data_type: string
+    selector:
+      type: css
+      query: h1::text
+  - name: author
+    data_type: string
+    selector:
+      type: css
+      query: .author::text
+  - name: published_date
+    data_type: string
+    selector:
+      type: css
+      query: time::attr(datetime)
+  - name: excerpt
+    data_type: string
+    selector:
+      type: css
+      query: p.summary::text

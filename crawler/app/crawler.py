@@ -7,11 +7,11 @@ import scrapy
 from scrapy.crawler import CrawlerProcess
 
 from .config import CrawlConfig, load_config
-from .parser import parse_book_card
+from .parser import find_next_page, parse_record
 
 
-class BooksSpider(scrapy.Spider):
-    name = "books"
+class SchemaSpider(scrapy.Spider):
+    name = "schema_crawler"
 
     def __init__(self, config: CrawlConfig, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -22,22 +22,48 @@ class BooksSpider(scrapy.Spider):
     def parse(self, response):
         self.page_count += 1
 
-        for card in response.css("article.product_pod"):
-            record = parse_book_card(response, card)
-            record["compartment"] = self.config.compartment
-            if self.config.keyword_filters:
-                title = (record.get("title") or "").lower()
+        records = response.css(self.config.schema.record_selector.query)
+        if self.config.schema.record_selector.type == "xpath":
+            records = response.xpath(self.config.schema.record_selector.query)
+
+        for item in records:
+            record = parse_record(
+                response=response,
+                item=item,
+                fields=self.config.schema.fields,
+                detail_link_selector=self.config.schema.detail_link_selector,
+            )
+            title = str(record.get("title") or "").lower()
+            if self.config.keyword_filters and title:
                 if not any(keyword in title for keyword in self.config.keyword_filters):
                     continue
+            elif self.config.keyword_filters and not title:
+                continue
+
+            record["compartment"] = self.config.compartment
+            record["dataset_name"] = self.config.schema.dataset_name
+            record["schema_path"] = self.config.schema_path
             yield record
 
         if self.page_count >= self.config.max_pages:
             self.logger.info("Reached max pages limit: %s", self.config.max_pages)
             return
 
-        next_page = response.css("li.next a::attr(href)").get()
+        next_page = find_next_page(response, self.config.schema.pagination_selector)
         if next_page:
             yield response.follow(next_page, callback=self.parse)
+
+
+def _feed_fields(cfg: CrawlConfig) -> list[str]:
+    field_names = [field.name for field in cfg.schema.fields]
+    metadata_fields = ["source_url", "compartment", "dataset_name", "schema_path", "scraped_at"]
+    seen = set()
+    ordered: list[str] = []
+    for name in field_names + metadata_fields:
+        if name not in seen:
+            ordered.append(name)
+            seen.add(name)
+    return ordered
 
 
 def run_crawler(config: CrawlConfig | None = None) -> None:
@@ -49,22 +75,13 @@ def run_crawler(config: CrawlConfig | None = None) -> None:
         cfg.output_file: {
             "format": "csv",
             "overwrite": True,
-            "fields": [
-                "title",
-                "price",
-                "rating",
-                "availability_text",
-                "source_url",
-                "compartment",
-                "scraped_at",
-            ],
+            "fields": _feed_fields(cfg),
         }
     }
 
     process = CrawlerProcess(
         settings={
             "FEEDS": feed_settings,
-            # Airflow task logging can recurse with Scrapy root handlers in this setup.
             "LOG_ENABLED": False,
             "ROBOTSTXT_OBEY": True,
             "REQUEST_FINGERPRINTER_IMPLEMENTATION": "2.7",
@@ -75,7 +92,7 @@ def run_crawler(config: CrawlConfig | None = None) -> None:
         }
     )
 
-    process.crawl(BooksSpider, config=cfg)
+    process.crawl(SchemaSpider, config=cfg)
     process.start()
 
 

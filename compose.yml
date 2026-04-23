@@ -3,52 +3,52 @@ services:
     image: postgres:15
     container_name: crawler-postgres
     environment:
-      POSTGRES_USER: platform
-      POSTGRES_PASSWORD: platform
-      POSTGRES_DB: airflow
+      POSTGRES_USER: ${POSTGRES_USER:-platform}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-platform}
+      POSTGRES_DB: ${POSTGRES_DB:-airflow}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U platform -d airflow"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-platform} -d ${POSTGRES_DB:-airflow}"]
       interval: 10s
       timeout: 5s
       retries: 10
     networks:
       - crawler-net
 
-  crawler:
-    build:
-      context: ./crawler
-    container_name: crawler-runner
-    environment:
-      CRAWLER_START_URLS: ${CRAWLER_START_URLS:-https://books.toscrape.com/}
-      CRAWLER_KEYWORDS: ${CRAWLER_KEYWORDS:-}
-      CRAWLER_MAX_PAGES: ${CRAWLER_MAX_PAGES:-5}
-      CRAWLER_COMPARTMENT: ${CRAWLER_COMPARTMENT:-default}
-      OUTPUT_FILE: /app/data/raw/books_raw.csv
+  redis:
+    image: redis:7-alpine
+    container_name: crawler-redis
+    command: ["redis-server", "--appendonly", "yes"]
     volumes:
-      - ./data:/app/data
-    command: ["python", "-m", "app.crawler"]
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     networks:
       - crawler-net
-    profiles: ["manual"]
 
   airflow-init:
     build:
       context: ./pipeline
     container_name: airflow-init
-    hostname: airflow-init
     environment: &airflow-env
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://platform:platform@postgres:5432/airflow
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-platform}:${POSTGRES_PASSWORD:-platform}@postgres:5432/${POSTGRES_DB:-airflow}
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${POSTGRES_USER:-platform}:${POSTGRES_PASSWORD:-platform}@postgres:5432/${POSTGRES_DB:-airflow}
+      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:-}
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
       AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
-      AIRFLOW__WEBSERVER__SECRET_KEY: airflow_local_shared_secret_key_change_in_prod
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY:-airflow_local_shared_secret_key_change_in_prod}
       AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.session,airflow.api.auth.backend.basic_auth
       AIRFLOW_UID: "50000"
       PYTHONPATH: /opt/airflow/src:/opt/platform
-      WAREHOUSE_DSN: postgresql+psycopg2://platform:platform@postgres:5432/analytics
+      WAREHOUSE_DSN: postgresql+psycopg2://${POSTGRES_USER:-platform}:${POSTGRES_PASSWORD:-platform}@postgres:5432/analytics
       RAW_CSV_PATH: /opt/platform/data/raw/books_raw.csv
       PROCESSED_CSV_PATH: /opt/platform/data/processed/books_clean.csv
       OUTPUT_FILE: /opt/platform/data/raw/books_raw.csv
@@ -56,38 +56,32 @@ services:
       CRAWLER_KEYWORDS: ${CRAWLER_KEYWORDS:-}
       CRAWLER_MAX_PAGES: ${CRAWLER_MAX_PAGES:-10}
       CRAWLER_COMPARTMENT: ${CRAWLER_COMPARTMENT:-default}
-      AIRFLOW_BOOTSTRAP_ON_STARTUP: ${AIRFLOW_BOOTSTRAP_ON_STARTUP:-true}
-      AIRFLOW_BOOTSTRAP_DAG_ID: ${AIRFLOW_BOOTSTRAP_DAG_ID:-crawler_csv_to_postgres}
+      CRAWLER_SOURCE_CONFIG: ${CRAWLER_SOURCE_CONFIG:-/opt/platform/crawler/schemas/default_schema.yml}
+      CRAWLER_SCHEMA_PATH: ${CRAWLER_SCHEMA_PATH:-/opt/platform/crawler/schemas/default_schema.yml}
     command:
       - bash
       - -c
       - |
         airflow db migrate && \
         (airflow users create \
-          --username admin \
-          --password admin \
+          --username ${AIRFLOW_ADMIN_USERNAME:-admin} \
+          --password ${AIRFLOW_ADMIN_PASSWORD:-admin} \
           --firstname Admin \
           --lastname User \
           --role Admin \
-          --email admin@example.com || true) && \
-        if [ "$${AIRFLOW_BOOTSTRAP_ON_STARTUP}" = "true" ]; then \
-          EXISTING_RUNS=$(python -c "import os; from sqlalchemy import create_engine, text; dag_id=os.getenv('AIRFLOW_BOOTSTRAP_DAG_ID', 'crawler_csv_to_postgres'); engine=create_engine(os.environ['AIRFLOW__DATABASE__SQL_ALCHEMY_CONN']); conn=engine.connect(); print(conn.execute(text('SELECT COUNT(*) FROM dag_run WHERE dag_id = :dag_id'), {'dag_id': dag_id}).scalar_one()); conn.close()"); \
-          if [ "$${EXISTING_RUNS}" = "0" ]; then \
-            echo "Bootstrapping initial DAG run for $${AIRFLOW_BOOTSTRAP_DAG_ID}"; \
-            airflow dags unpause "$${AIRFLOW_BOOTSTRAP_DAG_ID}" || true; \
-            airflow dags trigger "$${AIRFLOW_BOOTSTRAP_DAG_ID}" --run-id "bootstrap__initial"; \
-          else \
-            echo "Skipping bootstrap trigger: $${EXISTING_RUNS} existing runs found for $${AIRFLOW_BOOTSTRAP_DAG_ID}"; \
-          fi; \
-        fi
+          --email ${AIRFLOW_ADMIN_EMAIL:-admin@example.com} || true)
     volumes: &airflow-volumes
       - ./pipeline/dags:/opt/airflow/dags
       - ./pipeline/src:/opt/airflow/src
+      - airflow_logs:/opt/airflow/logs
       - ./crawler:/opt/platform/crawler
       - ./data:/opt/platform/data
       - ./db:/opt/platform/db
+      - ./superset:/opt/platform/superset
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     networks:
       - crawler-net
@@ -122,6 +116,22 @@ services:
     networks:
       - crawler-net
 
+  airflow-worker:
+    build:
+      context: ./pipeline
+    container_name: airflow-worker
+    hostname: airflow-worker
+    command: celery worker
+    environment:
+      <<: *airflow-env
+      DUMB_INIT_SETSID: "0"
+    volumes: *airflow-volumes
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    networks:
+      - crawler-net
+
   airflow-triggerer:
     build:
       context: ./pipeline
@@ -136,6 +146,30 @@ services:
     networks:
       - crawler-net
 
+  crawler:
+    build:
+      context: ./crawler
+    container_name: crawler-runner
+    environment:
+      CRAWLER_START_URLS: ${CRAWLER_START_URLS:-https://books.toscrape.com/}
+      CRAWLER_KEYWORDS: ${CRAWLER_KEYWORDS:-}
+      CRAWLER_MAX_PAGES: ${CRAWLER_MAX_PAGES:-10}
+      CRAWLER_COMPARTMENT: ${CRAWLER_COMPARTMENT:-default}
+      CRAWLER_SOURCE_CONFIG: ${CRAWLER_SOURCE_CONFIG:-/app/schemas/default_schema.yml}
+      CRAWLER_SCHEMA_PATH: ${CRAWLER_SCHEMA_PATH:-/app/schemas/default_schema.yml}
+      OUTPUT_FILE: /app/data/raw/books_raw.csv
+    volumes:
+      - ./crawler:/app
+      - ./data:/app/data
+      - ./pipeline:/app/pipeline
+    command: ["python", "-m", "app.crawler"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - crawler-net
+    profiles: ["manual"]
+
   superset-init:
     image: apache/superset:3.1.2
     container_name: superset-init
@@ -146,24 +180,28 @@ services:
         pip install --no-cache-dir psycopg2-binary && \
         superset db upgrade && \
         (superset fab create-admin \
-          --username admin \
+          --username ${SUPERSET_ADMIN_USERNAME:-admin} \
           --firstname Superset \
           --lastname Admin \
-          --email admin@example.com \
-          --password admin || true) && \
+          --email ${SUPERSET_ADMIN_EMAIL:-admin@example.com} \
+          --password ${SUPERSET_ADMIN_PASSWORD:-admin} || true) && \
         superset init && \
         python /app/pythonpath/bootstrap_superset.py
     environment: &superset-env
       SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
-      SUPERSET_SECRET_KEY: change_me_in_prod
-      SQLALCHEMY_DATABASE_URI: postgresql+psycopg2://platform:platform@postgres:5432/superset_metadata
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-change_me_in_prod}
+      SQLALCHEMY_DATABASE_URI: postgresql+psycopg2://${POSTGRES_USER:-platform}:${POSTGRES_PASSWORD:-platform}@postgres:5432/superset_metadata
     volumes:
       - superset_home:/app/superset_home
       - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
       - ./superset/bootstrap_superset.py:/app/pythonpath/bootstrap_superset.py:ro
+      - ./superset:/opt/platform/superset
+      - ./data:/opt/platform/data
     depends_on:
       postgres:
         condition: service_healthy
+      airflow-webserver:
+        condition: service_started
     networks:
       - crawler-net
 
@@ -174,7 +212,6 @@ services:
       - /bin/sh
       - -c
       - |
-        pip install --no-cache-dir psycopg2-binary && \
         /usr/bin/run-server.sh
     environment: *superset-env
     ports:
@@ -183,6 +220,8 @@ services:
       - superset_home:/app/superset_home
       - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
       - ./superset/bootstrap_superset.py:/app/pythonpath/bootstrap_superset.py:ro
+      - ./superset:/opt/platform/superset
+      - ./data:/opt/platform/data
     depends_on:
       superset-init:
         condition: service_completed_successfully
@@ -194,20 +233,17 @@ services:
       context: ./ui
     container_name: crawler-control-ui
     environment:
+      AIRFLOW_DAG_ID: ${AIRFLOW_BOOTSTRAP_DAG_ID:-crawler_csv_to_postgres}
       AIRFLOW_BASE_URL: http://airflow-webserver:8080
-      AIRFLOW_USERNAME: admin
-      AIRFLOW_PASSWORD: admin
-      AIRFLOW_DAG_ID: crawler_csv_to_postgres
+      AIRFLOW_USERNAME: ${AIRFLOW_ADMIN_USERNAME:-admin}
+      AIRFLOW_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin}
       SUPERSET_DASHBOARD_URL: http://localhost:8088/superset/dashboard/crawler-analytics/
-      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
     ports:
       - "8501:8501"
+    volumes:
+      - ./ui:/app
     depends_on:
       airflow-webserver:
-        condition: service_started
-      airflow-scheduler:
-        condition: service_started
-      airflow-triggerer:
         condition: service_started
       superset:
         condition: service_started
@@ -216,6 +252,8 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:
+  airflow_logs:
   superset_home:
 
 networks:

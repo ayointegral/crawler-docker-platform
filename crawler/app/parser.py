@@ -1,34 +1,69 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
+from typing import Any
 from urllib.parse import urljoin
 
-
-_RATING_MAP = {
-    "One": 1,
-    "Two": 2,
-    "Three": 3,
-    "Four": 4,
-    "Five": 5,
-}
+from .config import FieldSpec, SelectorSpec
 
 
-def parse_book_card(response, card):
-    title = card.css("h3 a::attr(title)").get(default="").strip()
-    raw_price = card.css("p.price_color::text").get(default="").strip()
-    availability = card.css("p.instock.availability::text").getall()
-    rating_class = card.css("p.star-rating::attr(class)").get(default="")
+def _select_values(target, selector: SelectorSpec) -> list[str]:
+    if selector.type == "xpath":
+        result = target.xpath(selector.query).getall()
+    else:
+        result = target.css(selector.query).getall()
+    return [str(value).strip() for value in result if str(value).strip()]
 
-    price_value = raw_price.replace("\u00a3", "").strip()
-    availability_text = " ".join(fragment.strip() for fragment in availability if fragment.strip())
-    rating_word = rating_class.split()[-1] if rating_class else ""
-    relative_url = card.css("h3 a::attr(href)").get(default="")
 
-    return {
-        "title": title,
-        "price": price_value,
-        "rating": _RATING_MAP.get(rating_word),
-        "availability_text": availability_text,
-        "source_url": urljoin(response.url, relative_url),
-        "scraped_at": datetime.now(timezone.utc).isoformat(),
-    }
+def _select_first(target, selector: SelectorSpec) -> str | None:
+    values = _select_values(target, selector)
+    return values[0] if values else None
+
+
+def _cast_value(raw_value: str | None, spec: FieldSpec) -> Any:
+    if raw_value is None:
+        return None
+
+    value = raw_value
+    if spec.regex:
+        match = re.search(spec.regex, value)
+        value = match.group(1) if match else ""
+
+    if spec.value_map and value in spec.value_map:
+        return spec.value_map[value]
+
+    data_type = spec.data_type
+    if data_type in {"string", "text"}:
+        return value
+    if data_type in {"integer", "int"}:
+        return int(value) if value else None
+    if data_type in {"float", "number", "decimal"}:
+        return float(value) if value else None
+    if data_type in {"boolean", "bool"}:
+        return value.lower() in {"1", "true", "yes", "y"}
+
+    return value
+
+
+def parse_record(
+    response,
+    item,
+    fields: list[FieldSpec],
+    detail_link_selector: SelectorSpec | None = None,
+) -> dict[str, Any]:
+    parsed: dict[str, Any] = {}
+    for field in fields:
+        raw = _select_first(item, field.selector)
+        parsed[field.name] = _cast_value(raw, field)
+
+    relative_url = _select_first(item, detail_link_selector) if detail_link_selector else None
+    parsed["source_url"] = urljoin(response.url, relative_url) if relative_url else response.url
+    parsed["scraped_at"] = datetime.now(timezone.utc).isoformat()
+    return parsed
+
+
+def find_next_page(response, selector: SelectorSpec | None) -> str | None:
+    if not selector:
+        return None
+    return _select_first(response, selector)
